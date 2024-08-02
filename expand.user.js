@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Twitter Auto Expand Tweets
-// @namespace    http://tampermonkey.net/
+// @namespace    leepavelich
 // @version      0.1
 // @description  Automatically expands tweets with more than 280 characters
 // @match        https://x.com/*
+// @match        https://twitter.com/*
 // @grant        none
 // ==/UserScript==
 
