@@ -2,4 +2,4 @@
 Userscript that automatically expands tweets in a thread that say "Show more"
 
 ## Installation
-Click on [this link](https://raw.githubusercontent.com/leepavelich/Twitter-Auto-Expand-Show-More/blob/main/expand.user.js) to install with your userscript extension of choice.
+Click on [this link](https://raw.githubusercontent.com/leepavelich/Twitter-Auto-Expand-Show-More/main/expand.user.js) to install with your userscript extension of choice.
