@@ -1,87 +1,101 @@
 // ==UserScript==
 // @name         Twitter Auto Expand Tweets
 // @namespace    leepavelich
-// @version      0.1
+// @version      0.2
 // @description  Automatically expands tweets with more than 280 characters
 // @match        https://x.com/*
 // @match        https://twitter.com/*
+// @run-at       document-start
 // @grant        none
 // ==/UserScript==
 
 (() => {
     'use strict';
 
-    const fixTweet = tweet => {
-        if (!tweet?.legacy) return;
+    const VALID_PATHS = [
+        "TweetDetail",
+        "HomeTimeline",
+        "HomeLatestTimeline",
+        "UserTweets",
+        "UserTweetsAndReplies",
+        "UserMedia",
+        "Likes",
+        "SearchTimeline",
+        "Bookmarks",
+        "ListLatestTweetsTimeline",
+    ];
 
-        if (tweet.note_tweet) {
-            const noteResults = tweet.note_tweet.note_tweet_results.result;
-            tweet.legacy.full_text = noteResults.text;
-            tweet.legacy.display_text_range = [0, noteResults.text.length];
+    const ENTITY_KEYS = ["user_mentions", "urls", "hashtags", "media", "symbols"];
 
-            ["user_mentions", "urls", "hashtags", "media", "symbols"].forEach(key => {
-                if (noteResults.entity_set[key]) {
-                    tweet.legacy.entities[key] = noteResults.entity_set[key];
-                }
-            });
-        }
+    const expandNoteTweet = tweet => {
+        const note = tweet.note_tweet?.note_tweet_results?.result;
+        if (!note?.text || !tweet.legacy) return false;
 
-        tweet.quoted_status_result?.result && fixTweet(tweet.quoted_status_result.result);
-        tweet.legacy.retweeted_status_result?.result && fixTweet(tweet.legacy.retweeted_status_result.result);
-    };
+        tweet.legacy.full_text = note.text;
+        // display_text_range is measured in Unicode code points, not UTF-16 units
+        tweet.legacy.display_text_range = [0, [...note.text].length];
 
-    const patchApiResult = (apiPath, data) => {
-        let timeline;
-
-        if (apiPath === "TweetDetail") {
-            timeline = data.data.threaded_conversation_with_injections_v2;
-        } else if (["HomeTimeline", "HomeLatestTimeline", "UserTweets", "UserTweetsAndReplies", "UserMedia", "Likes", "SearchTimeline"].includes(apiPath)) {
-            timeline = data.data[Object.keys(data.data)[0]].timeline;
-        } else {
-            return data;
-        }
-
-        if (!timeline) return data;
-
-        timeline.instructions?.forEach(instruction => {
-            if (instruction.type === "TimelineAddEntries") {
-                instruction.entries.forEach(entry => {
-                    const content = entry.content?.itemContent?.tweet_results?.result;
-                    const items = entry.content?.items;
-                    content && fixTweet(content);
-                    items?.forEach(item => {
-                        const itemContent = item.item?.itemContent?.tweet_results?.result;
-                        itemContent && fixTweet(itemContent);
-                    });
-                });
+        tweet.legacy.entities = tweet.legacy.entities ?? {};
+        ENTITY_KEYS.forEach(key => {
+            if (note.entity_set?.[key]) {
+                tweet.legacy.entities[key] = note.entity_set[key];
             }
         });
-
-        removeShowMoreLinks();
-        return data;
+        return true;
     };
 
-    const removeShowMoreLinks = () => {
-        document.querySelectorAll('[data-testid="tweet-text-show-more-link"]').forEach(link => link.remove());
+    // Walk the whole response and expand every note tweet found, wherever the
+    // endpoint nests them (timelines, pinned entries, modules, quoted tweets,
+    // visibility wrappers, ...). Returns the number of tweets expanded.
+    const expandAll = node => {
+        if (!node || typeof node !== "object") return 0;
+        let count = 0;
+        if (!Array.isArray(node) && node.note_tweet && node.legacy) {
+            count += expandNoteTweet(node) ? 1 : 0;
+        }
+        Object.values(node).forEach(child => { count += expandAll(child); });
+        return count;
     };
 
     const originalOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function () {
-        this.addEventListener('readystatechange', function (event) {
-            if (this.readyState === 4) {
-                const urlPath = event.target.responseURL ? new URL(event.target.responseURL).pathname : "";
-                const apiPath = urlPath.split("/").pop();
-                const validPaths = ["UserTweets", "HomeTimeline", "HomeLatestTimeline", "SearchTimeline", "TweetDetail", "UserTweetsAndReplies", "UserMedia", "Likes"];
+        this.addEventListener('readystatechange', function () {
+            if (this.readyState !== 4) return;
+            // responseText is only readable when responseType is '' or 'text'
+            if (this.responseType && this.responseType !== 'text') return;
+            try {
+                const urlPath = this.responseURL ? new URL(this.responseURL).pathname : "";
+                if (!urlPath.startsWith("/i/api/")) return;
+                if (!VALID_PATHS.includes(urlPath.split("/").pop())) return;
 
-                if (urlPath.startsWith("/i/api/") && validPaths.includes(apiPath)) {
-                    let responseData = JSON.parse(this.responseText);
-                    responseData = patchApiResult(apiPath, responseData);
-                    Object.defineProperty(this, 'response', { writable: true });
-                    Object.defineProperty(this, 'responseText', { writable: true });
-                    this.response = this.responseText = JSON.stringify(responseData);
+                const data = JSON.parse(this.responseText);
+                if (expandAll(data) > 0) {
+                    const patched = JSON.stringify(data);
+                    Object.defineProperty(this, 'response', { value: patched });
+                    Object.defineProperty(this, 'responseText', { value: patched });
                 }
+            } catch {
+                // Never let a malformed or unexpected response break the page's
+                // own handlers; the tweet just stays truncated.
             }
         });
         return originalOpen.apply(this, arguments);
     };
+
+    // The client may still render a "Show more" link on expanded tweets (it
+    // keys off note_tweet, which we leave in place). Remove the links as they
+    // are rendered, not just when a response is patched.
+    const SHOW_MORE_SELECTOR = '[data-testid="tweet-text-show-more-link"]';
+    const startLinkRemover = () => {
+        const removeShowMoreLinks = () =>
+            document.querySelectorAll(SHOW_MORE_SELECTOR).forEach(link => link.remove());
+        removeShowMoreLinks();
+        new MutationObserver(removeShowMoreLinks)
+            .observe(document.body, { childList: true, subtree: true });
+    };
+    if (document.body) {
+        startLinkRemover();
+    } else {
+        document.addEventListener('DOMContentLoaded', startLinkRemover);
+    }
 })();
